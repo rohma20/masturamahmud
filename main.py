@@ -31,16 +31,52 @@ def init_db():
         user_id INTEGER PRIMARY KEY,
         referrer_id INTEGER,
         invited_count INTEGER DEFAULT 0,
-        is_counted INTEGER DEFAULT 0
+        is_counted INTEGER DEFAULT 0,
+        username TEXT
     )
     """)
     conn.commit()
     conn.close()
 
+# ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ТАБЛИЦЫ ЛИДЕРОВ
+def get_leaderboard_text():
+    conn = sqlite3.connect("referrals.db")
+    cur = conn.cursor()
+    # Выбираем ТОП-10 пользователей, у которых больше всего инвайтов
+    cur.execute("""
+        SELECT username, user_id, invited_count 
+        FROM users 
+        WHERE invited_count > 0
+        ORDER BY invited_count DESC 
+        LIMIT 10
+    """)
+    rows = cur.fetchall()
+    conn.close()
+
+    if not rows:
+        return "🏆 *TOP TAKLIF QILGANLAR* 🏆\n\nHozircha ro‘yxat bo‘sh. Birinchi bo‘ling!"
+
+    text = "🏆 *TOP TAKLIF QILGANLAR* 🏆\n\n"
+    for rank, row in enumerate(rows, 1):
+        username = row[0]
+        user_id = row[1]
+        count = row[2]
+        
+        # Если у юзера нет юзернейма, показываем скрытую ссылку по его ID
+        if username:
+            user_display = f"@{username}"
+        else:
+            user_display = f"[Foydalanuvchi](tg://user?id={user_id})"
+            
+        text += f"{rank}. {user_display} — *{count}* ta taklif\n"
+    
+    return text
+
 # ОБРАБОТЧИК КОМАНДЫ /START
 @dp.message(CommandStart())
 async def start_handler(message: types.Message):
     user_id = message.from_user.id
+    username = message.from_user.username
     args = message.text.split()
     referrer_id = None
 
@@ -66,10 +102,12 @@ async def start_handler(message: types.Message):
         if referrer_id == user_id:
             referrer_id = None
         cur.execute(
-            "INSERT INTO users (user_id, referrer_id) VALUES (?,?)",
-            (user_id, referrer_id)
+            "INSERT INTO users (user_id, referrer_id, username) VALUES (?,?,?)",
+            (user_id, referrer_id, username)
         )
     else:
+        # Если юзер обновил юзернейм в телеге, обновляем его и в базе
+        cur.execute("UPDATE users SET username=? WHERE user_id=?", (username, user_id))
         old_ref = user[0]
         # Если юзер зашел раньше сам, но теперь перешел по ссылке и у него нет реферера — обновляем
         if old_ref is None and referrer_id and referrer_id != user_id:
@@ -88,11 +126,11 @@ async def start_handler(message: types.Message):
         inline_keyboard=[
             [InlineKeyboardButton(text="📢 Kanalga a'zo bo'lish", url=MAIN_CHANNEL_LINK)],
             [InlineKeyboardButton(text="📤 Do'stlarga ulashish", url=f"https://t.me/share/url?url={link}&text=Kitob marafoniga qo'shiling!")],
+            [InlineKeyboardButton(text="🏆 Top taklif qilganlar", callback_data="leaderboard")],
             [InlineKeyboardButton(text="✅ Natijani tekshirish", callback_data="check")]
         ]
     )
 
-    # Заменили ** на * для стандартного Markdown Телеграма
     text = f"""
 ✨ *Kitobxon qizlar jamoasi* bilan birgalikda kunlik mutolaa qilib, kitobxonlik ko‘nikmasini shakllantirish-chi?
 
@@ -109,7 +147,6 @@ Unda quyidagi havolani do‘stlaringizga yuboring va *5 ta do‘stingizni taklif
 📚 Aytgancha, bu kanalda *bepul arab tili darslari ham bor.*
 """
 
-    # Добавлен параметр parse_mode="Markdown" чтобы работал жирный текст и код
     await message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
 # ОТСЛЕЖИВАНИЕ ВХОДА В КАНАЛ
@@ -119,6 +156,7 @@ async def user_join(event: ChatMemberUpdated):
         return
 
     user_id = event.new_chat_member.user.id
+    username = event.new_chat_member.user.username
 
     conn = sqlite3.connect("referrals.db")
     cur = conn.cursor()
@@ -149,6 +187,13 @@ async def user_join(event: ChatMemberUpdated):
                 )
             except Exception:
                 pass
+    else:
+        # Если пользователя вообще не было в базе (зашел напрямую), просто логируем его с юзернеймом
+        cur.execute(
+            "INSERT INTO users (user_id, referrer_id, username, is_counted) VALUES (?, ?, ?, 1)",
+            (user_id, None, username)
+        )
+        conn.commit()
 
     conn.close()
 
@@ -166,14 +211,26 @@ async def check(callback: types.CallbackQuery):
 
     if count >= REQUIRED_INVITES:
         await callback.message.answer(
-            f"🎉 Tabriklayman! Vazifa bajarildi.\n\nMana guruh havolasi:\n{MARAFON_GROUP_LINK}"
+            f"🎉 Tabriklayman! Vazifa baja'rildi.\n\nMana guruh havolasi:\n{MARAFON_GROUP_LINK}"
         )
     else:
-        # Всплывающее окошко-уведомление в Telegram
         await callback.answer(
             f"Siz hali etarlicha odam taklif qilmadingiz. Takliflar: {count}/{REQUIRED_INVITES}",
             show_alert=True
         )
+
+# ОБРАБОТКА ИНЛАЙН-КНОПКИ ЛИДЕРБОРДА
+@dp.callback_query(F.data == "leaderboard")
+async def leaderboard_callback(callback: types.CallbackQuery):
+    leaderboard_text = get_leaderboard_text()
+    await callback.message.answer(leaderboard_text, parse_mode="Markdown")
+    await callback.answer()
+
+# КОМАНДА /LEADERS
+@dp.message(Command("leaders"))
+async def leaders_command(message: types.Message):
+    leaderboard_text = get_leaderboard_text()
+    await message.answer(leaderboard_text, parse_mode="Markdown")
 
 # КОМАНДА /STATS
 @dp.message(Command("stats"))
