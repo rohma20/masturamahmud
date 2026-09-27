@@ -34,6 +34,8 @@ def init_db():
         is_counted INTEGER DEFAULT 0
     )
     """)
+    cur.execute("UPDATE users SET invited_count = 0, is_counted = 0")
+    
     conn.commit()
     conn.close()
 
